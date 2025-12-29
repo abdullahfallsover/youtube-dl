@@ -472,6 +472,12 @@ class YoutubeDL(object):
 
         register_socks_protocols()
 
+        # Initialize offline download helper if enabled
+        self._offline_helper = None
+        if self.params.get('offline_download'):
+            from .offline import OfflineDownloadHelper
+            self._offline_helper = OfflineDownloadHelper(self, self.params['offline_download'])
+
     def warn_if_short_id(self, argv):
         # short YouTube ID starting with dash?
         idxs = [
@@ -1183,6 +1189,10 @@ class YoutubeDL(object):
         if self.params.get('playlistrandom', False):
             random.shuffle(entries)
 
+        # Set up offline download directory if enabled
+        if self._offline_helper:
+            self._offline_helper.setup_playlist(ie_result)
+
         x_forwarded_for = ie_result.get('__x_forwarded_for_ip')
 
         for i, entry in enumerate(entries, 1):
@@ -1214,6 +1224,11 @@ class YoutubeDL(object):
             # TODO: skip failed (empty) entries?
             playlist_results.append(entry_result)
         ie_result['entries'] = playlist_results
+
+        # Finalize offline manifest if enabled
+        if self._offline_helper:
+            self._offline_helper.finalize()
+
         self.to_screen('[download] Finished downloading playlist: %s' % playlist)
         return ie_result
 
@@ -1973,11 +1988,32 @@ class YoutubeDL(object):
 
         info_dict['_filename'] = filename = self.prepare_filename(info_dict)
 
+        # Override filename for offline download mode
+        offline_paths = None
+        if self._offline_helper:
+            # For single videos (not in a playlist), set up the offline directory first
+            if self._offline_helper.playlist_dir is None:
+                self._offline_helper.setup_single_video(info_dict)
+
+            playlist_index = info_dict.get('playlist_index') or 1
+            offline_paths = self._offline_helper.get_video_paths(playlist_index, info_dict)
+            filename = offline_paths['video']
+            info_dict['_filename'] = filename
+            info_dict['_offline_paths'] = offline_paths
+
         # Forced printings
         self.__forced_printings(info_dict, filename, incomplete=False)
 
         # Do nothing else if in simulate mode
         if self.params.get('simulate', False):
+            # In simulate mode with offline, still track video entries for reporting
+            if self._offline_helper and info_dict.get('_offline_paths'):
+                offline_paths = info_dict['_offline_paths']
+                playlist_index = info_dict.get('playlist_index') or 1
+                self._offline_helper.add_video_entry(playlist_index, info_dict, offline_paths, downloaded=True)
+                # For single videos, finalize immediately
+                if self._offline_helper._is_single_video:
+                    self._offline_helper.finalize()
             return
 
         if filename is None:
@@ -2070,6 +2106,20 @@ class YoutubeDL(object):
             replace_extension(filename, 'info.json', info_dict.get('ext')))
 
         self._write_thumbnails(info_dict, filename)
+
+        # Handle offline mode with --skip-download (create placeholders and manifest entries)
+        if self.params.get('skip_download', False) and self._offline_helper and info_dict.get('_offline_paths'):
+            offline_paths = info_dict['_offline_paths']
+            playlist_index = info_dict.get('playlist_index') or 1
+            # Create empty placeholder file
+            self._offline_helper.create_placeholder(offline_paths['video'])
+            # Add entry to manifest (marked as not downloaded)
+            self._offline_helper.add_video_entry(playlist_index, info_dict, offline_paths, downloaded=False)
+            # Download thumbnail even with --skip-download
+            self._download_offline_thumbnail(info_dict, offline_paths)
+            # For single videos, finalize immediately
+            if self._offline_helper._is_single_video:
+                self._offline_helper.finalize()
 
         if not self.params.get('skip_download', False):
             try:
@@ -2241,6 +2291,18 @@ class YoutubeDL(object):
                     self.report_error('postprocessing: %s' % error_to_compat_str(err))
                     return
                 self.record_download_archive(info_dict)
+
+                # Add video to offline manifest if enabled
+                if self._offline_helper and info_dict.get('_offline_paths'):
+                    offline_paths = info_dict['_offline_paths']
+                    playlist_index = info_dict.get('playlist_index') or 1
+                    self._offline_helper.add_video_entry(playlist_index, info_dict, offline_paths, downloaded=True)
+                    # Download thumbnail to offline location
+                    self._download_offline_thumbnail(info_dict, offline_paths)
+                    # For single videos, finalize immediately
+                    if self._offline_helper._is_single_video:
+                        self._offline_helper.finalize()
+
                 # avoid possible nugatory search for further items (PR #26638)
                 if self._num_downloads >= max_downloads:
                     raise MaxDownloadsReached()
@@ -2712,3 +2774,32 @@ class YoutubeDL(object):
                 except (compat_urllib_error.URLError, compat_http_client.HTTPException, socket.error) as err:
                     self.report_warning('Unable to download thumbnail "%s": %s' %
                                         (t['url'], error_to_compat_str(err)))
+
+    def _download_offline_thumbnail(self, info_dict, offline_paths):
+        """Download thumbnail for offline mode."""
+        thumbnails = info_dict.get('thumbnails')
+        if not thumbnails:
+            return
+
+        # Get the best quality thumbnail (last in list)
+        thumb = thumbnails[-1]
+        thumb_url = thumb.get('url')
+        if not thumb_url:
+            return
+
+        thumb_filename = offline_paths.get('thumbnail')
+        if not thumb_filename:
+            return
+
+        if os.path.exists(encodeFilename(thumb_filename)):
+            self.to_screen('[offline] Thumbnail already present: %s' % thumb_filename)
+            return
+
+        try:
+            self.to_screen('[offline] Downloading thumbnail...')
+            uf = self.urlopen(thumb_url)
+            with open(encodeFilename(thumb_filename), 'wb') as thumbf:
+                shutil.copyfileobj(uf, thumbf)
+            self.to_screen('[offline] Wrote thumbnail: %s' % thumb_filename)
+        except (compat_urllib_error.URLError, compat_http_client.HTTPException, socket.error) as err:
+            self.report_warning('Unable to download offline thumbnail: %s' % error_to_compat_str(err))

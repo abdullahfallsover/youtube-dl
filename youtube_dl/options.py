@@ -886,6 +886,17 @@ def parseOpts(overrideArguments=None):
         metavar='FORMAT', dest='convertsubtitles', default=None,
         help='Convert the subtitles to other format (currently supported: srt|ass|vtt|lrc)')
 
+    offline = optparse.OptionGroup(parser, 'Offline Mode Options')
+    offline.add_option(
+        '--offline-download',
+        dest='offline_download', metavar='DIRPATH',
+        help='Download playlist/video for offline browsing to DIRPATH. '
+             'Creates a structured directory with metadata for use with --offline-cli.')
+    offline.add_option(
+        '--offline-cli',
+        dest='offline_cli', metavar='DIRPATH',
+        help='Launch interactive CLI to browse an offline-downloaded playlist at DIRPATH.')
+
     parser.add_option_group(general)
     parser.add_option_group(network)
     parser.add_option_group(geo)
@@ -900,6 +911,7 @@ def parseOpts(overrideArguments=None):
     parser.add_option_group(authentication)
     parser.add_option_group(adobe_pass)
     parser.add_option_group(postproc)
+    parser.add_option_group(offline)
 
     if overrideArguments is not None:
         opts, args = parser.parse_args(overrideArguments)

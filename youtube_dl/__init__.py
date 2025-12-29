@@ -218,6 +218,33 @@ def _real_main(argv=None):
         if opts.convertsubtitles not in ['srt', 'vtt', 'ass', 'lrc']:
             parser.error('invalid subtitle format specified')
 
+    # Handle offline-cli mode (early exit before any downloading)
+    if opts.offline_cli:
+        from .offline import run_offline_cli
+        run_offline_cli(expand_path(opts.offline_cli), opts.no_color)
+        sys.exit(0)
+
+    # Offline download conflicts
+    if opts.offline_download:
+        conflicts = []
+        if opts.outtmpl is not None:
+            conflicts.append('--output')
+        if opts.useid:
+            conflicts.append('--id')
+        if opts.autonumber:
+            conflicts.append('--autonumber')
+        if opts.extract_flat:
+            conflicts.append('--flat-playlist')
+        if opts.dumpjson or opts.dump_single_json:
+            conflicts.append('--dump-json')
+        if opts.print_json:
+            conflicts.append('--print-json')
+        if any([opts.geturl, opts.gettitle, opts.getid, opts.getthumbnail,
+                opts.getdescription, opts.getfilename, opts.getformat, opts.getduration]):
+            conflicts.append('--get-* options')
+        if conflicts:
+            parser.error('--offline-download conflicts with: %s' % ', '.join(conflicts))
+
     if opts.date is not None:
         date = DateRange.day(opts.date)
     else:
@@ -441,6 +468,8 @@ def _real_main(argv=None):
         # just for deprecation check
         'autonumber': opts.autonumber if opts.autonumber is True else None,
         'usetitle': opts.usetitle if opts.usetitle is True else None,
+        # offline mode
+        'offline_download': expand_path(opts.offline_download) if opts.offline_download else None,
     }
 
     with YoutubeDL(ydl_opts) as ydl:
