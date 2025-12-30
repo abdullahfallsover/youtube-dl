@@ -10,6 +10,7 @@ youtube-dl - download videos from youtube.com or other video platforms
 - [OUTPUT TEMPLATE](#output-template)
 - [FORMAT SELECTION](#format-selection)
 - [VIDEO SELECTION](#video-selection)
+- [OFFLINE MODE](#offline-mode)
 - [FAQ](#faq)
 - [DEVELOPER INSTRUCTIONS](#developer-instructions)
 - [EMBEDDING YOUTUBE-DL](#embedding-youtube-dl)
@@ -478,6 +479,23 @@ Alternatively, refer to the [developer instructions](#developer-instructions) fo
     --convert-subs FORMAT                Convert the subtitles to other format
                                          (currently supported: srt|ass|vtt|lrc)
 
+## Offline Mode Options:
+    --offline-download DIRPATH           Download playlist/video for offline
+                                         browsing to DIRPATH. Creates a
+                                         structured directory with videos,
+                                         thumbnails, and metadata. Supports
+                                         resuming: re-running with the same
+                                         directory will skip already downloaded
+                                         videos and add new ones. Compatible
+                                         with --playlist-start/--playlist-end
+                                         for partial downloads.
+    --offline-cli DIRPATH                Launch interactive CLI to browse
+                                         offline-downloaded content at DIRPATH.
+                                         Accepts a single playlist directory or
+                                         a directory containing multiple
+                                         playlists. Use arrow keys or j/k to
+                                         navigate, Enter to play, q to quit.
+
 # CONFIGURATION
 
 You can configure youtube-dl by placing any supported command line option to a configuration file. On Linux and macOS, the system wide configuration file is located at `/etc/youtube-dl.conf` and the user wide configuration file at `~/.config/youtube-dl/config`. On Windows, the user wide configuration file locations are `%APPDATA%\youtube-dl\config.txt` or `C:\Users\<user name>\youtube-dl.conf`. Note that by default configuration file may not exist so you may need to create it yourself.
@@ -773,6 +791,25 @@ $ youtube-dl --date 19700101
 $ # Download only the videos uploaded in the 200x decade
 $ youtube-dl --dateafter 20000101 --datebefore 20091231
 ```
+
+# OFFLINE MODE
+
+Offline mode lets you download playlists into a structured directory and browse them later using an interactive terminal interface—even without an internet connection.
+
+```bash
+# Download a playlist for offline use
+youtube-dl --offline-download ~/offline https://youtube.com/playlist?list=PLxxxx
+
+# Browse your offline collection
+youtube-dl --offline-cli ~/offline
+```
+
+Key features:
+- **Resume support**: Re-running the download command skips already-downloaded videos
+- **Multiple playlists**: Download different playlists to the same directory and browse them all
+- **Metadata preserved**: Video titles, descriptions, thumbnails, and statistics are saved locally
+
+The interactive browser displays your playlists and videos with familiar keyboard navigation. Press `Enter` to play a video with your system's default player.
 
 # FAQ
 

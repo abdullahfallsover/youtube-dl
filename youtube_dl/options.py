@@ -891,11 +891,16 @@ def parseOpts(overrideArguments=None):
         '--offline-download',
         dest='offline_download', metavar='DIRPATH',
         help='Download playlist/video for offline browsing to DIRPATH. '
-             'Creates a structured directory with metadata for use with --offline-cli.')
+             'Creates a structured directory with metadata for use with --offline-cli. '
+             'Supports resuming: re-running with the same directory will skip already '
+             'downloaded videos and add new ones.')
     offline.add_option(
         '--offline-cli',
         dest='offline_cli', metavar='DIRPATH',
-        help='Launch interactive CLI to browse an offline-downloaded playlist at DIRPATH.')
+        help='Launch interactive CLI to browse offline-downloaded content at DIRPATH. '
+             'Accepts either a single playlist directory or a directory containing '
+             'multiple playlists. In multi-playlist mode, shows a playlist browser '
+             'with navigation to individual playlists.')
 
     parser.add_option_group(general)
     parser.add_option_group(network)

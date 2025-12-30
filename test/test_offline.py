@@ -15,14 +15,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from youtube_dl.offline import (
     OfflineDownloadHelper,
     OfflineCLI,
+    OfflinePlaylistBrowser,
     _safe_filename,
     _safe_dirname,
     _format_duration,
     _format_date,
     _format_count,
-    _truncate_string,
+    detect_directory_type,
+    load_playlist_info,
+    DirectoryType,
     MANIFEST_FILENAME,
 )
+from youtube_dl.utils import limit_length
 
 
 class MockYDL(object):
@@ -39,20 +43,23 @@ class MockYDL(object):
 class TestHelperFunctions(unittest.TestCase):
     """Tests for offline module helper functions."""
 
-    def test_truncate_string(self):
+    def test_limit_length(self):
+        # Uses the shared limit_length from utils.py
         # Short strings unchanged
-        self.assertEqual(_truncate_string('Short', 20), 'Short')
+        self.assertEqual(limit_length('Short', 20), 'Short')
         # Long strings truncated with suffix
-        result = _truncate_string('This is a very long string', 15)
+        result = limit_length('This is a very long string', 15)
         self.assertEqual(result, 'This is a ve...')
         self.assertEqual(len(result), 15)
         # Edge cases
-        self.assertIsNone(_truncate_string(None, 20))
-        self.assertEqual(_truncate_string('', 20), '')
+        self.assertIsNone(limit_length(None, 20))
+        self.assertEqual(limit_length('', 20), '')
 
     def test_format_duration(self):
-        # Various durations
-        self.assertEqual(_format_duration(30), '0:30')
+        # Various durations - uses formatSeconds from utils.py
+        # Note: formatSeconds returns just seconds for values under 60
+        self.assertEqual(_format_duration(30), '30')
+        self.assertEqual(_format_duration(65), '1:05')
         self.assertEqual(_format_duration(125), '2:05')
         self.assertEqual(_format_duration(3661), '1:01:01')
         self.assertIsNone(_format_duration(None))
@@ -259,6 +266,336 @@ class TestOfflineDownloadHelper(unittest.TestCase):
 
         self.assertTrue(os.path.exists(paths['video']))
         self.assertEqual(os.path.getsize(paths['video']), 0)
+
+    def test_resume_support_detects_existing_videos(self):
+        """Test that resume support correctly detects existing videos."""
+        # First, create an initial offline download
+        helper1 = OfflineDownloadHelper(self.mock_ydl, self.test_dir)
+        helper1.setup_playlist({'id': 'PL1', 'title': 'Test Playlist'})
+
+        # Add some videos
+        for i in range(3):
+            video_info = {
+                'id': 'vid%d' % i,
+                'title': 'Video %d' % i,
+                'ext': 'mp4',
+            }
+            paths = helper1.get_video_paths(i + 1, video_info)
+            helper1.add_video_entry(i + 1, video_info, paths, downloaded=True)
+
+        helper1.finalize()
+
+        # Now create a new helper targeting the same directory (simulating resume)
+        mock_ydl2 = MockYDL()
+        helper2 = OfflineDownloadHelper(mock_ydl2, self.test_dir)
+        helper2.setup_playlist({'id': 'PL1', 'title': 'Test Playlist'})
+
+        # Verify it detected as resumed
+        self.assertTrue(helper2._resumed)
+
+        # Verify existing videos are detected
+        self.assertTrue(helper2.is_video_already_downloaded({'id': 'vid0'}))
+        self.assertTrue(helper2.is_video_already_downloaded({'id': 'vid1'}))
+        self.assertTrue(helper2.is_video_already_downloaded({'id': 'vid2'}))
+        self.assertFalse(helper2.is_video_already_downloaded({'id': 'vid_new'}))
+
+        # Verify resuming message was printed
+        self.assertTrue(
+            any('Resuming offline download' in msg for msg in mock_ydl2.messages),
+            'Expected "Resuming" message in: %s' % mock_ydl2.messages
+        )
+
+    def test_resume_skips_existing_videos(self):
+        """Test that skip_existing_video correctly tracks skipped videos."""
+        # Create initial download
+        helper1 = OfflineDownloadHelper(self.mock_ydl, self.test_dir)
+        helper1.setup_playlist({'id': 'PL1', 'title': 'Test'})
+        video_info = {'id': 'vid1', 'title': 'Video 1', 'ext': 'mp4'}
+        paths = helper1.get_video_paths(1, video_info)
+        helper1.add_video_entry(1, video_info, paths, downloaded=True)
+        helper1.finalize()
+
+        # Resume
+        mock_ydl2 = MockYDL()
+        helper2 = OfflineDownloadHelper(mock_ydl2, self.test_dir)
+        helper2.setup_playlist({'id': 'PL1', 'title': 'Test'})
+
+        # Skip the existing video
+        helper2.skip_existing_video(video_info)
+
+        self.assertEqual(helper2._skipped_count, 1)
+        self.assertTrue(
+            any('Skipping already downloaded' in msg for msg in mock_ydl2.messages),
+            'Expected "Skipping" message in: %s' % mock_ydl2.messages
+        )
+
+    def test_resume_preserves_existing_entries(self):
+        """Test that resume preserves existing video entries."""
+        # Create initial download with 2 videos
+        helper1 = OfflineDownloadHelper(self.mock_ydl, self.test_dir)
+        helper1.setup_playlist({'id': 'PL1', 'title': 'Test'})
+
+        for i in range(2):
+            video_info = {'id': 'vid%d' % i, 'title': 'Video %d' % i, 'ext': 'mp4'}
+            paths = helper1.get_video_paths(i + 1, video_info)
+            helper1.add_video_entry(i + 1, video_info, paths, downloaded=True)
+
+        helper1.finalize()
+
+        # Resume and add a new video
+        mock_ydl2 = MockYDL()
+        helper2 = OfflineDownloadHelper(mock_ydl2, self.test_dir)
+        helper2.setup_playlist({'id': 'PL1', 'title': 'Test'})
+
+        # Existing entries should be preserved
+        self.assertEqual(len(helper2._video_entries), 2)
+
+        # Add a new video
+        new_video = {'id': 'vid_new', 'title': 'New Video', 'ext': 'mp4'}
+        paths = helper2.get_video_paths(3, new_video)
+        helper2.add_video_entry(3, new_video, paths, downloaded=True)
+        helper2.finalize()
+
+        # Verify manifest has all 3 videos
+        manifest_path = os.path.join(helper2.playlist_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+
+        self.assertEqual(len(manifest['videos']), 3)
+
+    def test_manifest_includes_updated_at_on_resume(self):
+        """Test that resumed manifests include updated_at timestamp."""
+        # Create initial download
+        helper1 = OfflineDownloadHelper(self.mock_ydl, self.test_dir)
+        helper1.setup_playlist({'id': 'PL1', 'title': 'Test'})
+        video_info = {'id': 'vid1', 'title': 'Video 1', 'ext': 'mp4'}
+        paths = helper1.get_video_paths(1, video_info)
+        helper1.add_video_entry(1, video_info, paths, downloaded=True)
+        helper1.finalize()
+
+        # Resume
+        mock_ydl2 = MockYDL()
+        helper2 = OfflineDownloadHelper(mock_ydl2, self.test_dir)
+        helper2.setup_playlist({'id': 'PL1', 'title': 'Test'})
+        helper2.finalize()
+
+        # Verify updated_at is present
+        manifest_path = os.path.join(helper2.playlist_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+
+        self.assertIn('updated_at', manifest)
+        self.assertIn('downloaded_at', manifest)
+
+
+class TestDirectoryTypeDetection(unittest.TestCase):
+    """Tests for directory type detection."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def _create_manifest(self, directory, playlist_title='Test Playlist'):
+        """Helper to create a manifest file in a directory."""
+        os.makedirs(directory, exist_ok=True)
+        manifest = {
+            'schema_version': '1.1',
+            'type': 'playlist',
+            'downloaded_at': '2025-12-29T12:00:00Z',
+            'playlist': {
+                'id': 'PLtest',
+                'title': playlist_title,
+                'description': 'Test description',
+                'uploader': 'Test Uploader',
+            },
+            'videos': [{'id': 'vid1', 'title': 'Test', 'filename': 'test.mp4', 'index': 1}],
+            'stats': {'total_videos': 1, 'downloaded_count': 1}
+        }
+        manifest_path = os.path.join(directory, MANIFEST_FILENAME)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f)
+        return manifest_path
+
+    def test_detect_single_playlist(self):
+        """Test detection of single playlist directory."""
+        self._create_manifest(self.test_dir)
+
+        dir_type, playlist_dirs, warning = detect_directory_type(self.test_dir)
+
+        self.assertEqual(dir_type, DirectoryType.SINGLE_PLAYLIST)
+        self.assertEqual(playlist_dirs, [self.test_dir])
+        self.assertIsNone(warning)
+
+    def test_detect_multi_playlist(self):
+        """Test detection of directory containing multiple playlists."""
+        # Create subdirectories with manifests
+        for i in range(3):
+            subdir = os.path.join(self.test_dir, 'playlist_%d' % i)
+            self._create_manifest(subdir, 'Playlist %d' % i)
+
+        dir_type, playlist_dirs, warning = detect_directory_type(self.test_dir)
+
+        self.assertEqual(dir_type, DirectoryType.MULTI_PLAYLIST)
+        self.assertEqual(len(playlist_dirs), 3)
+        self.assertIsNone(warning)
+
+    def test_detect_multi_playlist_with_warning(self):
+        """Test detection warns about non-playlist items."""
+        # Create one playlist subdirectory
+        self._create_manifest(os.path.join(self.test_dir, 'playlist_1'))
+
+        # Create a non-playlist directory
+        os.makedirs(os.path.join(self.test_dir, 'random_dir'))
+
+        # Create a random file
+        with open(os.path.join(self.test_dir, 'random_file.txt'), 'w') as f:
+            f.write('test')
+
+        dir_type, playlist_dirs, warning = detect_directory_type(self.test_dir)
+
+        self.assertEqual(dir_type, DirectoryType.MULTI_PLAYLIST)
+        self.assertEqual(len(playlist_dirs), 1)
+        self.assertIsNotNone(warning)
+        self.assertIn('not offline playlists', warning)
+
+    def test_detect_invalid_path(self):
+        """Test detection of non-existent path."""
+        dir_type, playlist_dirs, warning = detect_directory_type('/nonexistent/path')
+
+        self.assertEqual(dir_type, DirectoryType.INVALID)
+        self.assertIsNone(playlist_dirs)
+        self.assertIsNotNone(warning)
+
+    def test_detect_empty_directory(self):
+        """Test detection of empty directory."""
+        dir_type, playlist_dirs, warning = detect_directory_type(self.test_dir)
+
+        self.assertEqual(dir_type, DirectoryType.UNKNOWN)
+        self.assertIsNone(playlist_dirs)
+        self.assertIn('No offline playlists found', warning)
+
+
+class TestLoadPlaylistInfo(unittest.TestCase):
+    """Tests for load_playlist_info function."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_load_playlist_info(self):
+        """Test loading playlist info from manifest."""
+        manifest = {
+            'schema_version': '1.1',
+            'type': 'playlist',
+            'downloaded_at': '2025-12-29T12:00:00Z',
+            'source_url': 'https://youtube.com/playlist?list=PLtest',
+            'playlist': {
+                'id': 'PLtest',
+                'title': 'Test Playlist',
+                'description': 'A test playlist',
+                'uploader': 'Test Channel',
+                'uploader_id': '@test',
+            },
+            'videos': [{'id': 'v1'}, {'id': 'v2'}],
+            'stats': {'total_videos': 2, 'downloaded_count': 2}
+        }
+        manifest_path = os.path.join(self.test_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f)
+
+        info = load_playlist_info(self.test_dir)
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info['title'], 'Test Playlist')
+        self.assertEqual(info['uploader'], 'Test Channel')
+        self.assertEqual(info['total_videos'], 2)
+        self.assertEqual(info['downloaded_count'], 2)
+        self.assertEqual(info['path'], self.test_dir)
+
+    def test_load_playlist_info_not_found(self):
+        """Test loading info from directory without manifest."""
+        info = load_playlist_info(self.test_dir)
+        self.assertIsNone(info)
+
+    def test_load_playlist_info_invalid_json(self):
+        """Test loading info from invalid JSON manifest."""
+        manifest_path = os.path.join(self.test_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'w') as f:
+            f.write('invalid json {')
+
+        info = load_playlist_info(self.test_dir)
+        self.assertIsNone(info)
+
+
+class TestOfflinePlaylistBrowser(unittest.TestCase):
+    """Tests for OfflinePlaylistBrowser class."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        # Create multiple playlist directories
+        self.playlist_dirs = []
+        for i in range(3):
+            subdir = os.path.join(self.test_dir, 'playlist_%d' % i)
+            os.makedirs(subdir)
+            manifest = {
+                'schema_version': '1.1',
+                'type': 'playlist',
+                'downloaded_at': '2025-12-29T12:00:00Z',
+                'playlist': {
+                    'id': 'PL%d' % i,
+                    'title': 'Playlist %d' % i,
+                    'description': 'Description for playlist %d' % i,
+                    'uploader': 'Uploader %d' % i,
+                },
+                'videos': [{'id': 'v1', 'title': 'Video', 'filename': 'v.mp4', 'index': 1}],
+                'stats': {'total_videos': 1, 'downloaded_count': 1}
+            }
+            manifest_path = os.path.join(subdir, MANIFEST_FILENAME)
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f)
+            self.playlist_dirs.append(subdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_load_playlists(self):
+        """Test loading playlists."""
+        browser = OfflinePlaylistBrowser(self.test_dir, self.playlist_dirs)
+        browser.load_playlists()
+
+        self.assertEqual(len(browser.playlists), 3)
+        # Check that titles are loaded
+        titles = [p['title'] for p in browser.playlists]
+        self.assertIn('Playlist 0', titles)
+        self.assertIn('Playlist 1', titles)
+        self.assertIn('Playlist 2', titles)
+
+    def test_load_playlists_empty_raises(self):
+        """Test that loading with no valid playlists raises error."""
+        browser = OfflinePlaylistBrowser(self.test_dir, [])
+        with self.assertRaises(RuntimeError) as ctx:
+            browser.load_playlists()
+        self.assertIn('No valid playlists found', str(ctx.exception))
+
+    def test_browser_navigation(self):
+        """Test browser navigation state."""
+        browser = OfflinePlaylistBrowser(self.test_dir, self.playlist_dirs)
+        browser.load_playlists()
+
+        # Initial state
+        self.assertEqual(browser.selected_index, 0)
+
+        # Simulate navigation
+        browser.selected_index = 1
+        self.assertEqual(browser.selected_index, 1)
+
+        # Go to last
+        browser.selected_index = len(browser.playlists) - 1
+        self.assertEqual(browser.selected_index, 2)
 
 
 class TestOfflineCLI(unittest.TestCase):

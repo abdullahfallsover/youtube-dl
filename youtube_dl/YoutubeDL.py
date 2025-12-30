@@ -1995,6 +1995,11 @@ class YoutubeDL(object):
             if self._offline_helper.playlist_dir is None:
                 self._offline_helper.setup_single_video(info_dict)
 
+            # Check if video already exists (resume support)
+            if self._offline_helper.is_video_already_downloaded(info_dict):
+                self._offline_helper.skip_existing_video(info_dict)
+                return
+
             playlist_index = info_dict.get('playlist_index') or 1
             offline_paths = self._offline_helper.get_video_paths(playlist_index, info_dict)
             filename = offline_paths['video']
