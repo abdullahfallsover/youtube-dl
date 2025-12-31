@@ -794,22 +794,45 @@ $ youtube-dl --dateafter 20000101 --datebefore 20091231
 
 # OFFLINE MODE
 
-Offline mode lets you download playlists into a structured directory and browse them later using an interactive terminal interface—even without an internet connection.
+Offline mode lets you download playlists and browse them later—even without an internet connection.
+
+## Quick Start (Recommended)
+
+The easiest way to use offline mode is with the **interactive wizard**:
 
 ```bash
-# Download a playlist for offline use
+youtube-dl --offline-download
+```
+
+This guides you through selecting a playlist URL and download location. After downloading, you'll be prompted to browse your content or download more.
+
+To browse previously downloaded content:
+
+```bash
+youtube-dl --offline-cli
+```
+
+This opens an interactive browser. Use arrow keys to navigate, Enter to play videos, `d` to update a playlist, or `D` to download something new.
+
+## Manual Usage
+
+You can also specify paths directly:
+
+```bash
+# Download a playlist to a specific location
 youtube-dl --offline-download ~/offline https://youtube.com/playlist?list=PLxxxx
 
-# Browse your offline collection
+# Browse a specific location
 youtube-dl --offline-cli ~/offline
 ```
 
-Key features:
-- **Resume support**: Re-running the download command skips already-downloaded videos
-- **Multiple playlists**: Download different playlists to the same directory and browse them all
-- **Metadata preserved**: Video titles, descriptions, thumbnails, and statistics are saved locally
+## Features
 
-The interactive browser displays your playlists and videos with familiar keyboard navigation. Press `Enter` to play a video with your system's default player.
+- **Interactive wizard**: Guided prompts for URL and directory with validation
+- **Recent downloads**: Quick access to previously downloaded playlists
+- **Resume support**: Re-running download skips already-downloaded videos
+- **Seamless navigation**: Switch between browsing and downloading with keyboard shortcuts
+- **Metadata preserved**: Video titles, descriptions, thumbnails, and statistics saved locally
 
 # FAQ
 

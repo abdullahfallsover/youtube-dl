@@ -219,10 +219,34 @@ def _real_main(argv=None):
             parser.error('invalid subtitle format specified')
 
     # Handle offline-cli mode (early exit before any downloading)
-    if opts.offline_cli:
-        from .offline import run_offline_cli
-        run_offline_cli(expand_path(opts.offline_cli), opts.no_color)
+    if opts.offline_cli is not None:
+        from .offline import run_offline_cli, _load_settings, _save_settings
+
+        cli_path = opts.offline_cli
+        if cli_path == '':
+            # No path provided - use last CLI directory from settings
+            settings = _load_settings()
+            cli_path = settings.get('last_cli_directory')
+            if not cli_path:
+                parser.error('--offline-cli requires DIRPATH (no saved default found). '
+                             'Run with a path first to set the default.')
+
+        # Save as last used directory
+        settings = _load_settings()
+        settings['last_cli_directory'] = expand_path(cli_path)
+        _save_settings(settings)
+
+        run_offline_cli(expand_path(cli_path), opts.no_color)
         sys.exit(0)
+
+    # Handle interactive offline download wizard
+    if opts.offline_download == '':
+        from .offline import run_download_wizard
+        url, directory = run_download_wizard(opts.no_color)
+        if not url or not directory:
+            sys.exit(0)  # User cancelled
+        opts.offline_download = directory
+        all_urls = [url]
 
     # Offline download conflicts
     if opts.offline_download:
@@ -499,6 +523,11 @@ def _real_main(argv=None):
         except MaxDownloadsReached:
             ydl.to_screen('--max-download limit reached, aborting.')
             retcode = 101
+
+    # After successful offline download, offer to launch browser
+    if opts.offline_download and retcode == 0:
+        from .offline import _prompt_launch_browser
+        _prompt_launch_browser(expand_path(opts.offline_download), opts.no_color)
 
     sys.exit(retcode)
 

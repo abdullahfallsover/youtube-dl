@@ -14,6 +14,7 @@ from .compat import (
     compat_open as open,
     compat_shlex_split,
 )
+from .offline import _looks_like_url
 from .utils import (
     preferredencoding,
     write_string,
@@ -108,6 +109,20 @@ def parseOpts(overrideArguments=None):
 
     def _comma_separated_values_options_callback(option, opt_str, value, parser):
         setattr(parser.values, option.dest, value.split(','))
+
+    def _optional_path_callback(option, opt_str, value, parser):  # pylint: disable=unused-argument
+        """Handle optional path argument for offline options.
+
+        Sets destination to '' (empty string) if no path provided,
+        or to the path if one is provided. URL-like values are not
+        consumed as paths.
+        """
+        remaining_args = parser.rargs
+        path = None
+        has_next_arg = remaining_args and remaining_args[0] and not remaining_args[0].startswith('-')
+        if has_next_arg and not _looks_like_url(remaining_args[0]):
+            path = remaining_args.pop(0)
+        setattr(parser.values, option.dest, path if path else '')
 
     # No need to wrap help messages if we're on a wide console
     columns = compat_get_terminal_size().columns
@@ -889,15 +904,20 @@ def parseOpts(overrideArguments=None):
     offline = optparse.OptionGroup(parser, 'Offline Mode Options')
     offline.add_option(
         '--offline-download',
-        dest='offline_download', metavar='DIRPATH',
-        help='Download playlist/video for offline browsing to DIRPATH. '
+        dest='offline_download', metavar='[DIRPATH]',
+        action='callback', callback=_optional_path_callback,
+        help='Download playlist/video for offline browsing. Without DIRPATH, '
+             'launches an interactive wizard with recent downloads list. '
+             'With DIRPATH, downloads to that directory. '
              'Creates a structured directory with metadata for use with --offline-cli. '
              'Supports resuming: re-running with the same directory will skip already '
              'downloaded videos and add new ones.')
     offline.add_option(
         '--offline-cli',
-        dest='offline_cli', metavar='DIRPATH',
-        help='Launch interactive CLI to browse offline-downloaded content at DIRPATH. '
+        dest='offline_cli', metavar='[DIRPATH]',
+        action='callback', callback=_optional_path_callback,
+        help='Launch interactive CLI to browse offline-downloaded content. '
+             'Without DIRPATH, uses the last browsed directory. '
              'Accepts either a single playlist directory or a directory containing '
              'multiple playlists. In multi-playlist mode, shows a playlist browser '
              'with navigation to individual playlists.')

@@ -16,17 +16,26 @@ from youtube_dl.offline import (
     OfflineDownloadHelper,
     OfflineCLI,
     OfflinePlaylistBrowser,
+    OfflineDownloadWizard,
     _safe_filename,
     _safe_dirname,
     _format_duration,
     _format_date,
     _format_count,
+    _load_settings,
+    _save_settings,
+    _add_recent_download,
+    _get_settings_path,
+    _looks_like_url,
     detect_directory_type,
     load_playlist_info,
     DirectoryType,
     MANIFEST_FILENAME,
+    MAX_RECENT_DOWNLOADS,
 )
+from youtube_dl.options import parseOpts
 from youtube_dl.utils import limit_length
+import youtube_dl.offline as offline_module
 
 
 class MockYDL(object):
@@ -757,6 +766,273 @@ class TestOfflineOptions(unittest.TestCase):
         self.assertIsNotNone(opts.offline_download)
         self.assertEqual(opts.playliststart, 2)
         self.assertEqual(opts.playlistend, 5)
+
+
+class TestOfflineSettings(unittest.TestCase):
+    """Tests for offline settings persistence."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self._original_get_settings_path = None
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def _patch_settings_path(self):
+        """Patch _get_settings_path to use test directory."""
+        self._original_get_settings_path = offline_module._get_settings_path
+        settings_path = os.path.join(self.test_dir, 'offline.json')
+        offline_module._get_settings_path = lambda: settings_path
+        return settings_path
+
+    def _restore_settings_path(self):
+        """Restore original _get_settings_path."""
+        if self._original_get_settings_path:
+            offline_module._get_settings_path = self._original_get_settings_path
+
+    def test_load_empty_settings(self):
+        """Test loading settings when file doesn't exist."""
+        self._patch_settings_path()
+        try:
+            settings = _load_settings()
+            self.assertEqual(settings, {})
+        finally:
+            self._restore_settings_path()
+
+    def test_save_and_load_settings(self):
+        """Test saving and loading settings."""
+        self._patch_settings_path()
+        try:
+            settings = {
+                'last_cli_directory': '/path/to/cli',
+                'last_download_directory': '/path/to/downloads',
+                'recent_downloads': []
+            }
+            _save_settings(settings)
+
+            loaded = _load_settings()
+            self.assertEqual(loaded['last_cli_directory'], '/path/to/cli')
+            self.assertEqual(loaded['last_download_directory'], '/path/to/downloads')
+        finally:
+            self._restore_settings_path()
+
+    def test_add_recent_download(self):
+        """Test adding to recent downloads list."""
+        settings = {'recent_downloads': []}
+        _add_recent_download(settings, '/path/to/playlist', 'https://example.com', 'Test', 10)
+
+        self.assertEqual(len(settings['recent_downloads']), 1)
+        entry = settings['recent_downloads'][0]
+        self.assertEqual(entry['path'], '/path/to/playlist')
+        self.assertEqual(entry['url'], 'https://example.com')
+        self.assertEqual(entry['title'], 'Test')
+        self.assertEqual(entry['video_count'], 10)
+
+    def test_add_recent_download_updates_existing(self):
+        """Test that adding duplicate path updates existing entry."""
+        settings = {'recent_downloads': []}
+        _add_recent_download(settings, '/path/to/playlist', 'https://example.com', 'Test', 10)
+        _add_recent_download(settings, '/path/to/playlist', 'https://example.com', 'Test Updated', 15)
+
+        self.assertEqual(len(settings['recent_downloads']), 1)
+        entry = settings['recent_downloads'][0]
+        self.assertEqual(entry['title'], 'Test Updated')
+        self.assertEqual(entry['video_count'], 15)
+
+    def test_add_recent_download_prunes_to_max(self):
+        """Test that recent downloads list is pruned to max size."""
+        settings = {'recent_downloads': []}
+        for i in range(MAX_RECENT_DOWNLOADS + 5):
+            _add_recent_download(settings, '/path/%d' % i, 'https://example.com/%d' % i, 'Test %d' % i, i)
+
+        self.assertEqual(len(settings['recent_downloads']), MAX_RECENT_DOWNLOADS)
+        self.assertEqual(settings['recent_downloads'][0]['path'], '/path/%d' % (MAX_RECENT_DOWNLOADS + 4))
+
+
+class TestOfflineDownloadWizard(unittest.TestCase):
+    """Tests for OfflineDownloadWizard class."""
+
+    def test_validate_url_valid_youtube(self):
+        """Test URL validation with valid YouTube URLs."""
+        wizard = OfflineDownloadWizard()
+        valid, info = wizard._validate_url('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+        self.assertTrue(valid)
+        self.assertIn('youtube', info.lower())
+
+    def test_validate_url_invalid(self):
+        """Test URL validation with invalid URLs."""
+        wizard = OfflineDownloadWizard()
+        valid, info = wizard._validate_url('not-a-url')
+        self.assertFalse(valid)
+
+        valid, info = wizard._validate_url('')
+        self.assertFalse(valid)
+
+    def test_validate_directory_existing(self):
+        """Test directory validation with existing directory."""
+        test_dir = tempfile.mkdtemp()
+        try:
+            wizard = OfflineDownloadWizard()
+            valid, result = wizard._validate_directory(test_dir)
+            self.assertTrue(valid)
+            self.assertEqual(result, os.path.abspath(test_dir))
+        finally:
+            shutil.rmtree(test_dir)
+
+    def test_validate_directory_empty(self):
+        """Test directory validation with empty path."""
+        wizard = OfflineDownloadWizard()
+        valid, result = wizard._validate_directory('')
+        self.assertFalse(valid)
+
+    def test_validate_directory_file_not_dir(self):
+        """Test directory validation when path is a file."""
+        test_dir = tempfile.mkdtemp()
+        try:
+            test_file = os.path.join(test_dir, 'testfile.txt')
+            with open(test_file, 'w') as f:
+                f.write('test')
+
+            wizard = OfflineDownloadWizard()
+            valid, result = wizard._validate_directory(test_file)
+            self.assertFalse(valid)
+            self.assertIn('not a directory', result)
+        finally:
+            shutil.rmtree(test_dir)
+
+
+class TestOfflineOptionsWithCallback(unittest.TestCase):
+    """Tests for offline command-line options with optional arguments."""
+
+    def test_offline_download_with_path(self):
+        """Test --offline-download with path argument."""
+        parser, opts, args = parseOpts(['--offline-download', '/tmp/test', 'https://example.com'])
+        self.assertEqual(opts.offline_download, '/tmp/test')
+        self.assertIn('https://example.com', args)
+
+    def test_offline_download_without_path(self):
+        """Test --offline-download without path argument (interactive mode)."""
+        parser, opts, args = parseOpts(['--offline-download', 'https://example.com'])
+        self.assertEqual(opts.offline_download, '')
+        self.assertIn('https://example.com', args)
+
+    def test_offline_download_no_following_args(self):
+        """Test --offline-download with no following arguments."""
+        parser, opts, args = parseOpts(['--offline-download'])
+        self.assertEqual(opts.offline_download, '')
+
+    def test_offline_cli_with_path(self):
+        """Test --offline-cli with path argument."""
+        parser, opts, args = parseOpts(['--offline-cli', '/tmp/offline'])
+        self.assertEqual(opts.offline_cli, '/tmp/offline')
+
+    def test_offline_cli_without_path(self):
+        """Test --offline-cli without path argument."""
+        parser, opts, args = parseOpts(['--offline-cli'])
+        self.assertEqual(opts.offline_cli, '')
+
+
+class TestCLIDownloadIntegration(unittest.TestCase):
+    """Tests for CLI download integration."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        # Create a manifest with source_url
+        self.manifest = {
+            'schema_version': '1.1',
+            'type': 'playlist',
+            'downloaded_at': '2025-12-29T12:00:00Z',
+            'source_url': 'https://youtube.com/playlist?list=PLtest',
+            'playlist': {
+                'id': 'PLtest',
+                'title': 'Test Playlist',
+                'description': 'A test playlist',
+                'uploader': 'Test Channel',
+            },
+            'videos': [
+                {
+                    'index': 1,
+                    'id': 'vid1',
+                    'title': 'Test Video',
+                    'filename': 'test.mp4',
+                    'downloaded': True,
+                },
+            ],
+            'stats': {'total_videos': 1, 'downloaded_count': 1}
+        }
+        manifest_path = os.path.join(self.test_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(self.manifest, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_cli_has_source_url(self):
+        """Test that CLI can access source URL from manifest."""
+        cli = OfflineCLI(self.test_dir)
+        cli.load_manifest()
+
+        source_url = cli.manifest.get('source_url')
+        self.assertEqual(source_url, 'https://youtube.com/playlist?list=PLtest')
+
+    def test_cli_without_source_url(self):
+        """Test CLI behavior when manifest has no source URL."""
+        # Remove source_url from manifest
+        manifest_no_url = dict(self.manifest)
+        del manifest_no_url['source_url']
+        manifest_path = os.path.join(self.test_dir, MANIFEST_FILENAME)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest_no_url, f)
+
+        cli = OfflineCLI(self.test_dir)
+        cli.load_manifest()
+
+        source_url = cli.manifest.get('source_url')
+        self.assertIsNone(source_url)
+
+
+class TestOfflineDownloadHelperSettingsIntegration(unittest.TestCase):
+    """Tests for OfflineDownloadHelper saving to settings."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.mock_ydl = MockYDL()
+        self._patch_settings_path()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+        self._restore_settings_path()
+
+    def _patch_settings_path(self):
+        """Patch _get_settings_path to use test directory."""
+        self._original_get_settings_path = offline_module._get_settings_path
+        self.settings_path = os.path.join(self.test_dir, 'settings', 'offline.json')
+        offline_module._get_settings_path = lambda: self.settings_path
+
+    def _restore_settings_path(self):
+        """Restore original _get_settings_path."""
+        offline_module._get_settings_path = self._original_get_settings_path
+
+    def test_finalize_saves_to_settings(self):
+        """Test that finalize() saves to recent downloads."""
+        helper = OfflineDownloadHelper(self.mock_ydl, self.test_dir)
+        helper.setup_playlist({
+            'id': 'PL1',
+            'title': 'Test Playlist',
+            'webpage_url': 'https://youtube.com/playlist?list=PL1'
+        })
+
+        video_info = {'id': 'vid1', 'title': 'Test Video', 'ext': 'mp4'}
+        paths = helper.get_video_paths(1, video_info)
+        helper.add_video_entry(1, video_info, paths, downloaded=True)
+        helper.finalize()
+
+        settings = _load_settings()
+        self.assertIn('recent_downloads', settings)
+        self.assertEqual(len(settings['recent_downloads']), 1)
+        entry = settings['recent_downloads'][0]
+        self.assertEqual(entry['title'], 'Test Playlist')
+        self.assertEqual(entry['video_count'], 1)
 
 
 if __name__ == '__main__':

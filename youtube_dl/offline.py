@@ -8,6 +8,9 @@ import sys
 import time
 
 from .compat import (
+    compat_expanduser,
+    compat_getenv,
+    compat_input,
     compat_str,
 )
 from .utils import (
@@ -23,6 +26,93 @@ from .utils import (
 MANIFEST_FILENAME = '.offline_manifest.json'
 SCHEMA_VERSION = '1.1'
 MAX_TITLE_LENGTH = 200
+
+# Settings file configuration
+SETTINGS_FILENAME = 'offline.json'
+MAX_RECENT_DOWNLOADS = 10
+
+
+def _get_settings_path():
+    """Get cross-platform path for offline settings file.
+
+    Follows youtube-dl conventions:
+    - Windows: %APPDATA%/youtube-dl/offline.json
+    - Linux/Mac: ~/.config/youtube-dl/offline.json (XDG)
+    """
+    xdg_config_home = compat_getenv('XDG_CONFIG_HOME')
+    if xdg_config_home:
+        return os.path.join(xdg_config_home, 'youtube-dl', SETTINGS_FILENAME)
+
+    appdata = compat_getenv('APPDATA')
+    if appdata:
+        return os.path.join(appdata, 'youtube-dl', SETTINGS_FILENAME)
+
+    return os.path.join(compat_expanduser('~'), '.config', 'youtube-dl', SETTINGS_FILENAME)
+
+
+def _load_settings():
+    """Load offline settings from disk.
+
+    Returns:
+        dict: Settings dictionary, empty dict if file doesn't exist or is invalid.
+    """
+    settings_path = _get_settings_path()
+
+    if not os.path.exists(encodeFilename(settings_path)):
+        return {}
+
+    try:
+        with open(encodeFilename(settings_path), 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (IOError, ValueError):
+        return {}
+
+
+def _save_settings(settings):
+    """Save offline settings to disk atomically.
+
+    Args:
+        settings: dict to save
+    """
+    settings_path = _get_settings_path()
+
+    # Ensure parent directory exists
+    settings_dir = os.path.dirname(settings_path)
+    if not os.path.exists(encodeFilename(settings_dir)):
+        os.makedirs(encodeFilename(settings_dir))
+
+    write_json_file(settings, settings_path)
+
+
+def _looks_like_url(value):
+    """Check if a string looks like a URL.
+
+    Used to distinguish URLs from file paths in argument parsing.
+    """
+    if not value:
+        return False
+    return (value.startswith('http://') or
+            value.startswith('https://') or
+            value.startswith('www.'))
+
+
+def _add_recent_download(settings, path, url, title, video_count):
+    """Add or update an entry in the recent downloads list.
+
+    Updates existing entry if path matches, otherwise adds new entry.
+    Prunes list to MAX_RECENT_DOWNLOADS entries.
+    """
+    recent = settings.get('recent_downloads', [])
+    new_entry = {
+        'path': path,
+        'url': url,
+        'title': title or os.path.basename(path),
+        'last_updated': _utc_timestamp(),
+        'video_count': video_count,
+    }
+    recent = [r for r in recent if r.get('path') != path]
+    recent.insert(0, new_entry)
+    settings['recent_downloads'] = recent[:MAX_RECENT_DOWNLOADS]
 
 
 def _utc_timestamp():
@@ -523,6 +613,21 @@ class OfflineDownloadHelper(object):
             # Fresh download
             self.ydl.to_screen('[offline] Downloaded %d videos to offline playlist' % total)
 
+        # Update settings with this download for recent downloads list
+        try:
+            settings = _load_settings()
+            _add_recent_download(
+                settings,
+                path=self.playlist_dir,
+                url=self.manifest.get('source_url'),
+                title=self.manifest.get('playlist', {}).get('title'),
+                video_count=total,
+            )
+            settings['last_download_directory'] = self.output_dir
+            _save_settings(settings)
+        except Exception:
+            pass  # Don't fail the download if settings can't be saved
+
 
 class OfflineCLIBase(object):
     """Base class for offline CLI interfaces with shared functionality."""
@@ -883,9 +988,9 @@ class OfflineCLI(OfflineCLIBase):
         print('=' * self.term_width)
         print('Video %d of %d' % (self.selected_index + 1, len(self.videos)))
         if self.return_to_browser:
-            print('[Up/Down/j/k] Navigate  [Enter] Play  [b] Back  [q] Quit')
+            print('[Enter] Play  [d] Update  [D] New download  [b] Back  [q] Quit')
         else:
-            print('[Up/Down/j/k] Navigate  [Enter] Play  [q] Quit')
+            print('[Enter] Play  [d] Update  [D] New download  [q] Quit')
 
     def play_selected(self):
         """Play the selected video."""
@@ -918,6 +1023,97 @@ class OfflineCLI(OfflineCLIBase):
             print('Error opening video: %s' % e)
             self._read_key()
 
+    def _show_message(self, message):
+        """Show a message and wait for keypress."""
+        self._clear_screen()
+        print(message)
+        print('\nPress any key to continue...')
+        self._read_key()
+
+    def _update_playlist(self):
+        """Update the current playlist from its source URL."""
+        source_url = self.manifest.get('source_url')
+        if not source_url:
+            self._show_message('Error: No source URL saved in manifest.\n'
+                               'This playlist cannot be updated automatically.')
+            return
+
+        self._clear_screen()
+        print('=' * 60)
+        print('UPDATING PLAYLIST')
+        print('=' * 60)
+        print()
+        print('Source: %s' % source_url)
+        print('Location: %s' % self.playlist_dir)
+        print()
+
+        try:
+            # Import YoutubeDL and run the download
+            from . import YoutubeDL
+
+            ydl_opts = {
+                'offline_download': os.path.dirname(self.playlist_dir),
+                'writethumbnail': True,
+                'ignoreerrors': True,
+            }
+
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([source_url])
+
+            print('\nUpdate complete!')
+        except Exception as e:
+            print('\nError during update: %s' % e)
+
+        print('\nPress any key to continue...')
+        self._read_key()
+
+        # Reload manifest to show new videos
+        try:
+            self.load_manifest()
+        except Exception:
+            pass  # Keep showing existing data if reload fails
+
+    def _launch_wizard(self):
+        """Launch the interactive download wizard."""
+        url, directory = run_download_wizard(no_color=self.no_color)
+        if not url or not directory:
+            return  # User cancelled
+
+        self._clear_screen()
+        print('=' * 60)
+        print('DOWNLOADING')
+        print('=' * 60)
+        print()
+        print('URL: %s' % url)
+        print('Location: %s' % directory)
+        print()
+
+        try:
+            from . import YoutubeDL
+
+            ydl_opts = {
+                'offline_download': directory,
+                'writethumbnail': True,
+                'ignoreerrors': True,
+            }
+
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            print('\nDownload complete!')
+        except Exception as e:
+            print('\nError during download: %s' % e)
+
+        print('\nPress any key to continue...')
+        self._read_key()
+
+        # If we downloaded to the same location, reload
+        if directory == os.path.dirname(self.playlist_dir):
+            try:
+                self.load_manifest()
+            except Exception:
+                pass
+
     def handle_input(self):
         """Handle keyboard input. Returns 'back' if user wants to return to browser."""
         key = self._read_key()
@@ -948,6 +1144,10 @@ class OfflineCLI(OfflineCLIBase):
             self.selected_index = max(0, self.selected_index - self.visible_rows)
         elif key == 'pagedown':
             self.selected_index = min(len(self.videos) - 1, self.selected_index + self.visible_rows)
+        elif key == 'd':
+            self._update_playlist()
+        elif key == 'D':
+            self._launch_wizard()
 
         return None
 
@@ -1020,3 +1220,323 @@ def run_offline_cli(dirpath, no_color=False):
     except Exception as e:
         print('Error: %s' % e)
         sys.exit(1)
+
+
+class OfflineDownloadWizard(OfflineCLIBase):
+    """Interactive wizard for offline downloads.
+
+    Guides users through the download process with prompts for URL
+    and directory, validation, and recent downloads list.
+    """
+
+    def __init__(self, no_color=False):
+        super(OfflineDownloadWizard, self).__init__(no_color)
+        self.settings = _load_settings()
+
+    def _prompt_input(self, prompt, default=None):
+        """Prompt for line input with optional default.
+
+        Args:
+            prompt: The prompt text to display
+            default: Optional default value shown in brackets
+
+        Returns:
+            str: User input, or default if user pressed Enter with empty input
+        """
+        if default:
+            full_prompt = '%s [%s]: ' % (prompt, default)
+        else:
+            full_prompt = '%s: ' % prompt
+
+        try:
+            response = compat_input(full_prompt).strip()
+        except EOFError:
+            return None
+
+        return response if response else default
+
+    def _prompt_yes_no(self, prompt, default=True):
+        """Prompt for yes/no input.
+
+        Args:
+            prompt: The prompt text to display
+            default: Default value (True for yes, False for no)
+
+        Returns:
+            bool: True for yes, False for no, None if cancelled
+        """
+        if default:
+            hint = 'Y/n'
+        else:
+            hint = 'y/N'
+
+        full_prompt = '%s [%s]: ' % (prompt, hint)
+
+        try:
+            response = compat_input(full_prompt).strip().lower()
+        except EOFError:
+            return None
+
+        if not response:
+            return default
+        return response in ('y', 'yes')
+
+    def _validate_url(self, url):
+        """Validate URL using youtube-dl's extractors."""
+        if not url:
+            return False, 'URL cannot be empty'
+
+        if not (_looks_like_url(url) or '.' in url):
+            return False, 'Invalid URL format'
+
+        if url.startswith('www.'):
+            url = 'https://' + url
+
+        try:
+            from .extractor import gen_extractors
+            for ie in gen_extractors():
+                if ie.suitable(url):
+                    return True, ie.IE_NAME
+            return False, 'No extractor found for this URL. Supported sites include YouTube, Vimeo, and many others.'
+        except Exception as e:
+            return False, 'Error checking URL: %s' % str(e)
+
+    def _validate_directory(self, path):
+        """Validate directory path, offering to create if it doesn't exist.
+
+        Args:
+            path: Directory path to validate
+
+        Returns:
+            tuple: (is_valid, expanded_path or error_message)
+        """
+        if not path:
+            return False, 'Directory path cannot be empty'
+
+        # Expand user home directory
+        expanded = compat_expanduser(path)
+        expanded = os.path.abspath(expanded)
+
+        if os.path.exists(encodeFilename(expanded)):
+            if os.path.isdir(encodeFilename(expanded)):
+                return True, expanded
+            else:
+                return False, 'Path exists but is not a directory: %s' % expanded
+
+        # Directory doesn't exist - offer to create
+        print('Directory does not exist: %s' % expanded)
+        create = self._prompt_yes_no('Create it?', default=True)
+        if create:
+            try:
+                os.makedirs(encodeFilename(expanded))
+                print('Created directory: %s' % expanded)
+                return True, expanded
+            except OSError as e:
+                return False, 'Failed to create directory: %s' % str(e)
+        else:
+            return False, 'Directory not created'
+
+    def _show_recent_downloads(self):
+        """Display the recent downloads list with full paths.
+
+        Returns:
+            list: Recent downloads entries
+        """
+        recent = self.settings.get('recent_downloads', [])
+        if not recent:
+            print('No recent downloads.\n')
+            return []
+
+        print('Recent downloads:')
+        print()
+        for i, entry in enumerate(recent[:5], 1):
+            title = entry.get('title', 'Unknown')
+            video_count = entry.get('video_count', 0)
+            last_updated = entry.get('last_updated', '')
+            path = entry.get('path', '')
+            if last_updated:
+                last_updated = last_updated[:10]  # Just the date part
+
+            # Line 1: Number and title
+            print('  %d. %s' % (i, title))
+            # Line 2: Path
+            print('     Path: %s' % path)
+            # Line 3: Stats
+            stats_parts = ['%d videos' % video_count]
+            if last_updated:
+                stats_parts.append('updated %s' % last_updated)
+            print('     %s' % ', '.join(stats_parts))
+            print()
+
+        print('  N. New download')
+        print()
+        return recent[:5]
+
+    def _prompt_url(self):
+        """Prompt for URL with validation and retry.
+
+        Returns:
+            str: Valid URL, or None if cancelled
+        """
+        while True:
+            url = self._prompt_input('Enter playlist/video URL')
+            if url is None:
+                return None
+            if not url:
+                print('Please enter a URL.\n')
+                continue
+
+            valid, info = self._validate_url(url)
+            if valid:
+                print('Detected: %s\n' % info)
+                return url
+            else:
+                print('Error: %s' % info)
+                print('Examples:')
+                print('  - https://youtube.com/watch?v=xxxxx')
+                print('  - https://youtube.com/playlist?list=PLxxxxx')
+                print('  - https://youtu.be/xxxxx')
+                print()
+
+    def _prompt_directory(self):
+        """Prompt for download directory with validation and retry.
+
+        Returns:
+            str: Valid directory path, or None if cancelled
+        """
+        default_dir = self.settings.get('last_download_directory')
+        if not default_dir:
+            default_dir = os.path.join(compat_expanduser('~'), 'offline')
+
+        while True:
+            path = self._prompt_input('Where to save?', default=default_dir)
+            if path is None:
+                return None
+
+            valid, result = self._validate_directory(path)
+            if valid:
+                return result
+            else:
+                print('Error: %s\n' % result)
+
+    def run(self):
+        """Main wizard flow.
+
+        Returns:
+            tuple: (url, directory) if successful, (None, None) if cancelled
+        """
+        self._clear_screen()
+        print('=' * 60)
+        print('OFFLINE DOWNLOAD WIZARD')
+        print('=' * 60)
+        print()
+
+        # Show recent downloads
+        recent = self._show_recent_downloads()
+
+        # If there are recent downloads, let user select one or start new
+        url = None
+        directory = None
+
+        if recent:
+            choice = self._prompt_input('Select option', 'N')
+            if choice is None:
+                return None, None
+
+            if choice.upper() != 'N' and choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(recent):
+                    entry = recent[idx]
+                    url = entry.get('url')
+                    directory = entry.get('path')
+                    if url and directory:
+                        print('\nUpdating: %s' % entry.get('title', 'Unknown'))
+                        print('Source: %s' % url)
+                        print('Location: %s\n' % directory)
+                        return url, directory
+                    else:
+                        print('Error: Recent entry missing URL or path, starting new download.\n')
+
+        # New download flow
+        print()
+        url = self._prompt_url()
+        if not url:
+            return None, None
+
+        directory = self._prompt_directory()
+        if not directory:
+            return None, None
+
+        # Save the directory as last used
+        self.settings['last_download_directory'] = directory
+        _save_settings(self.settings)
+
+        print('\nDownloading to: %s\n' % directory)
+        return url, directory
+
+
+def run_download_wizard(no_color=False):
+    """Entry point for the interactive download wizard.
+
+    Args:
+        no_color: If True, disable color output.
+
+    Returns:
+        tuple: (url, directory) if successful, (None, None) if cancelled
+    """
+    try:
+        wizard = OfflineDownloadWizard(no_color=no_color)
+        return wizard.run()
+    except KeyboardInterrupt:
+        print('\nCancelled.')
+        return None, None
+    except Exception as e:
+        print('Error: %s' % e)
+        return None, None
+
+
+def _prompt_launch_browser(download_dir, no_color=False):
+    """Prompt user to launch the offline browser after download.
+
+    Args:
+        download_dir: The directory where content was downloaded
+        no_color: If True, disable color output
+    """
+    print()
+    print('=' * 60)
+    print('Download complete!')
+    print('=' * 60)
+    print()
+    print('What would you like to do?')
+    print('  1. Browse downloaded content')
+    print('  2. Download another playlist')
+    print('  3. Exit')
+    print()
+
+    try:
+        choice = compat_input('Select [1]: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if not choice or choice == '1':
+        # Launch browser
+        run_offline_cli(download_dir, no_color=no_color)
+    elif choice == '2':
+        # Launch wizard again
+        url, directory = run_download_wizard(no_color=no_color)
+        if url and directory:
+            # Need to do the download - import here to avoid circular import
+            try:
+                from . import YoutubeDL
+                ydl_opts = {
+                    'offline_download': directory,
+                    'writethumbnail': True,
+                    'ignoreerrors': True,
+                }
+                with YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                # Recurse to show menu again
+                _prompt_launch_browser(directory, no_color)
+            except Exception as e:
+                print('Error during download: %s' % e)
+    # Choice 3 or anything else: just exit
