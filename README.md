@@ -12,6 +12,7 @@ youtube-dl - download videos from youtube.com or other video platforms
 - [VIDEO SELECTION](#video-selection)
 - [FAQ](#faq)
 - [DEVELOPER INSTRUCTIONS](#developer-instructions)
+- [PLUGINS](#plugins)
 - [EMBEDDING YOUTUBE-DL](#embedding-youtube-dl)
 - [BUGS](#bugs)
 - [COPYRIGHT](#copyright)
@@ -1440,6 +1441,170 @@ from ..utils import (
         ...
 ```
 The extractor raises an exception rather than random crashes if the JSON structure changes so that no formats are found.
+
+# PLUGINS
+
+youtube-dl supports extractor plugins, allowing you to add support for additional sites without modifying youtube-dl itself. Plugins can be shared and installed independently.
+
+## For Users
+
+### Installing Plugins
+
+Plugins are loaded automatically from these directories:
+
+| Platform | User plugins | System plugins |
+|----------|-------------|----------------|
+| Linux/macOS | `~/.config/youtube-dl/plugins/extractor/` | `/etc/youtube-dl/plugins/extractor/` |
+| Windows | `%APPDATA%\youtube-dl\plugins\extractor\` | N/A |
+
+To install a plugin:
+
+1. Create the plugin directory if it doesn't exist
+2. Place the plugin `.py` file(s) in the directory
+3. Run youtube-dl normally - plugins are loaded automatically
+
+Plugins can also be installed via pip if the plugin author provides a package:
+
+```bash
+pip install youtube-dl-pluginname
+```
+
+### Plugin Behavior
+
+- **Priority**: Plugin extractors are checked *before* built-in extractors. A plugin can override youtube-dl's handling of a specific site.
+- **Multiple plugins**: You can install multiple plugins; they're all loaded together.
+- **No restart needed**: Plugins are loaded fresh each time youtube-dl runs.
+
+## For Developers
+
+### Creating a Plugin
+
+A plugin is a Python file containing one or more extractor classes. Requirements:
+
+1. Class name must end with `IE` (e.g., `MyServiceIE`)
+2. Must inherit from `youtube_dl.extractor.common.InfoExtractor`
+3. Must define `_VALID_URL` - a regex pattern matching supported URLs
+4. Must implement `_real_extract(self, url)` - the extraction method
+
+### Minimal Example
+
+Create `~/.config/youtube-dl/plugins/extractor/myservice.py`:
+
+```python
+# coding: utf-8
+from __future__ import unicode_literals
+
+from youtube_dl.extractor.common import InfoExtractor
+
+
+class MyServiceIE(InfoExtractor):
+    _VALID_URL = r'https?://(?:www\.)?myservice\.com/video/(?P<id>[0-9]+)'
+    IE_NAME = 'myservice'
+
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+        webpage = self._download_webpage(url, video_id)
+
+        title = self._html_search_regex(
+            r'<h1[^>]*>([^<]+)</h1>', webpage, 'title')
+        video_url = self._search_regex(
+            r'videoUrl\s*:\s*["\']([^"\']+)["\']', webpage, 'video url')
+
+        return {
+            'id': video_id,
+            'title': title,
+            'url': video_url,
+        }
+```
+
+### Plugin API Version
+
+Plugins can declare which API version they require:
+
+```python
+class MyServiceIE(InfoExtractor):
+    PLUGIN_API_VERSION = 1  # Optional; defaults to 1
+    _VALID_URL = r'...'
+```
+
+If a plugin requires a newer API version than the installed youtube-dl supports, it will be skipped with a warning. This allows graceful handling when users have older youtube-dl versions.
+
+### Distributing via pip
+
+For wider distribution, package your plugin for pip installation:
+
+**Directory structure:**
+```
+youtube-dl-myservice/
+├── setup.py
+└── myservice_extractor.py
+```
+
+**setup.py:**
+```python
+from setuptools import setup
+
+setup(
+    name='youtube-dl-myservice',
+    version='1.0.0',
+    py_modules=['myservice_extractor'],
+    entry_points={
+        'youtube_dl.plugins.extractor': [
+            'myservice = myservice_extractor',
+        ],
+    },
+    install_requires=['youtube-dl'],
+)
+```
+
+Users install with: `pip install youtube-dl-myservice`
+
+### Development Tips
+
+- Use `InfoExtractor` helper methods: `_download_webpage()`, `_download_json()`, `_search_regex()`, `_html_search_regex()`, `_og_search_title()`, etc.
+- Refer to existing extractors in `youtube_dl/extractor/` for patterns
+- Add `_TESTS` for automated testing (see existing extractors for format)
+- Test with `youtube-dl -v <url>` for verbose output
+
+## Troubleshooting
+
+### Testing Plugin Installation
+
+You can verify your plugin is detected by checking the extractor list:
+
+```bash
+youtube-dl --list-extractors | grep -i yourpluginname
+```
+
+To test a plugin in isolation, use the `YTDL_PLUGIN_DIRS` environment variable to override the default plugin directories:
+
+```bash
+YTDL_PLUGIN_DIRS=/path/to/test/plugins youtube-dl <url>
+```
+
+### Common Issues
+
+**Plugin not loading:**
+- Verify the file is in the correct directory (see table above)
+- Check the filename ends with `.py` and doesn't start with `_`
+- Ensure the class name ends with `IE`
+- Confirm `_VALID_URL` and `_real_extract` are defined
+
+**Import errors:**
+- Make sure `youtube-dl` is importable in Python: `python -c "import youtube_dl"`
+- Check for syntax errors: `python -m py_compile your_plugin.py`
+
+**Plugin loads but doesn't match URLs:**
+- Test your `_VALID_URL` regex: `python -c "import re; print(re.match(r'YOUR_REGEX', 'YOUR_URL'))"`
+- Remember the regex must match the *entire* URL
+
+**"requires plugin API version X" warning:**
+- Your youtube-dl is older than the plugin requires
+- Update youtube-dl: `pip install -U youtube-dl` or `youtube-dl -U`
+
+**Duplicate extractor warning:**
+- You have the same extractor class name in multiple plugins
+- Only the first one found is loaded; rename one of them
 
 # EMBEDDING YOUTUBE-DL
 
