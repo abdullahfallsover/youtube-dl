@@ -41,9 +41,38 @@ from .update import update_self
 from .downloader import (
     FileDownloader,
 )
-from .extractor import gen_extractors, list_extractors
+from .extractor import (
+    gen_extractors,
+    has_extractors,
+    is_plugin_only_mode,
+    list_extractors,
+)
 from .extractor.adobepass import MSO_INFO
 from .YoutubeDL import YoutubeDL
+
+
+# Error message shown when no extractors are available
+_NO_EXTRACTORS_MSG = '''\
+ERROR: No extractors are installed.
+
+youtube-dl requires extractor plugins to download from specific sites.
+The core youtube-dl package no longer bundles site-specific extractors.
+
+To install all extractors:
+    pip install youtube-dl-extractors
+
+To install only specific extractors (e.g., YouTube):
+    pip install youtube-dl-youtube
+
+For more information, see:
+    https://github.com/ytdl-org/youtube-dl#plugins
+'''
+
+# Warning shown when running in plugin-only mode
+_PLUGIN_MODE_MSG = '''\
+NOTE: Running in plugin-only mode. Only plugin extractors are available.
+Install youtube-dl-extractors for all built-in extractors.
+'''
 
 
 def _real_main(argv=None):
@@ -55,6 +84,19 @@ def _real_main(argv=None):
     setproctitle('youtube-dl')
 
     parser, opts, args = parseOpts(argv)
+
+    # Check if any extractors are available
+    if not has_extractors():
+        write_string(_NO_EXTRACTORS_MSG, out=sys.stderr)
+        sys.exit(1)
+
+    # Warn if running in plugin-only mode (unless quiet or in info mode)
+    if is_plugin_only_mode() and not any(
+        getattr(opts, attr, False)
+        for attr in ('quiet', 'dump_user_agent', 'list_extractors',
+                     'list_extractor_descriptions')
+    ):
+        write_string(_PLUGIN_MODE_MSG, out=sys.stderr)
 
     # Set user agent
     if opts.user_agent is not None:
